@@ -1,0 +1,20 @@
+[package]
+name = "robin-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rushaudio.workspace = true
+rtrb.workspace = true
+snow = "0.9"
+chacha20poly1305 = "0.10"
+hex = "0.4"
+rand = "0.8"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

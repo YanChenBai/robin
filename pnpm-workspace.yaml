@@ -1,0 +1,36 @@
+packages:
+  - apps/*
+  - packages/*
+  - scripts/*
+
+catalogMode: prefer
+
+allowBuilds:
+  "@nativescript/core": true
+  "@parcel/watcher": true
+  nativescript: true
+  esbuild: true
+  core-js-pure: false
+
+catalog:
+  "@nativescript/vite": 8.0.17
+  "@oxc-node/cli": ^0.1.4
+  "@types/node": ^24
+  "@vitejs/plugin-vue": ^6.0.9
+  "@vitejs/plugin-vue-jsx": ^5.1.6
+  "@vue/compiler-sfc": ^3.5.43
+  typescript: ^7.0.2
+  vite: npm:@voidzero-dev/vite-plus-core@1.0.0
+  vite-plus: 1.0.0
+  vue: ^3.5.43
+  vue-tsc: ^3.3.12
+
+catalogs:
+  nativescript:
+    typescript: ^6.0.3
+    vite: ^8.3.2
+peerDependencyRules:
+  allowAny:
+    - vite
+  allowedVersions:
+    vite: "*"

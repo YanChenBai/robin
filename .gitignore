@@ -1,0 +1,47 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# dotenv environment variable files
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI agent worktrees
+.claude/worktrees/
+!.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+
+
+# Added by cargo
+
+/target
+
+# NativeScript generated projects and Rust Android libraries
+apps/mobile/platforms/
+apps/mobile/hooks/
+packages/nativescript-robin/native/android/src/main/jniLibs/
+apps/mobile/.ns-vite-build/

@@ -1,0 +1,31 @@
+{
+  "name": "mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/app.ts",
+  "scripts": {
+    "dev": "oxnode ../../scripts/nativescript.ts run android --no-hmr",
+    "build": "oxnode ../../scripts/nativescript.ts build android --env.production",
+    "doctor": "oxnode ../../scripts/nativescript.ts doctor android",
+    "check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@nativescript/core": "~9.1.2",
+    "@robin/native": "workspace:*",
+    "nativescript-vue": "3.1.2"
+  },
+  "devDependencies": {
+    "@nativescript/android": "9.1.1",
+    "@nativescript/types": "~9.1.1",
+    "@nativescript/vite": "catalog:",
+    "@types/node": "catalog:",
+    "@vitejs/plugin-vue": "catalog:",
+    "@vitejs/plugin-vue-jsx": "catalog:",
+    "@vue/compiler-sfc": "catalog:",
+    "nativescript": "9.1.2",
+    "typescript": "catalog:nativescript",
+    "vite": "catalog:nativescript",
+    "vue-tsc": "catalog:"
+  }
+}

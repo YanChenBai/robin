@@ -1,0 +1,36 @@
+{
+  "name": "robin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "ready": "vp check && vp run -r test && vp run -r build",
+    "dev": "vp run desktop",
+    "website:dev": "vp run website#dev",
+    "desktop": "cargo run -p robin-desktop",
+    "desktop:build": "cargo build -p robin-desktop --release",
+    "desktop:check": "cargo check -p robin-desktop",
+    "desktop:capture-smoke": "cargo run -p robin-desktop -- --capture-smoke",
+    "rust:test": "cargo test --workspace",
+    "rust:check": "cargo clippy --workspace --all-targets -- -D warnings",
+    "native:android": "oxnode scripts/build-android.ts",
+    "mobile:dev": "vp run native:android && vp run mobile#dev",
+    "mobile:build": "vp run native:android && vp run mobile#build",
+    "mobile:check": "vp run mobile#check"
+  },
+  "devDependencies": {
+    "@oxc-node/cli": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.8.1",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}
