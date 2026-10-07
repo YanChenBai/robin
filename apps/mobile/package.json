@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "oxnode ../../scripts/nativescript.ts run android --no-hmr",
     "build": "oxnode ../../scripts/nativescript.ts build android --env.production",
+    "release": "oxnode ../../scripts/nativescript.ts build android --release --env.production",
     "doctor": "oxnode ../../scripts/nativescript.ts doctor android",
     "check": "vue-tsc --noEmit"
   },

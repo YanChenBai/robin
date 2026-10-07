@@ -18,6 +18,8 @@ vp run mobile:dev
 
 `vp run desktop:build` 构建 Windows 桌面正式版，输出位于 `target/release/robin-desktop.exe`。
 
+`vp run mobile:release` 构建并签名安卓正式版，输出位于 `apps/mobile/platforms/android/app/build/outputs/apk/release/app-release.apk`。首次构建自动生成本机签名，保存于 `%LOCALAPPDATA%/Robin/signing`，后续构建复用；备份时需保留整个签名目录。正式版使用不带调试器的 NativeScript 运行时，并压缩 JavaScript、移除源码映射。正式签名与调试版不同，首次从调试版切换需卸载旧版，重新配对电脑。
+
 安卓 APK 只打包 `arm64-v8a`，与 Rust 音频库支持的架构一致。构建配置先清空 NativeScript 默认 ABI 列表，避免同时打包 32 位和模拟器运行时；原生库在 APK 内压缩，安装时由 Android 解压。
 
 Android 启动图标原图为 `apps/mobile/assets/robin-icon.png`，背景为透明 RGBA。替换原图后需同步更新 `apps/mobile/App_Resources/Android` 中的各密度图标及自适应前景，再运行 `vp run mobile:build`。普通图标预先铺上白底；自适应头像铺满中央可见区域，由启动器裁切外侧发丝，并由 `#FFFFFFFF` 白色背景层承托。

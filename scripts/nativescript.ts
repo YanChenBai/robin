@@ -3,6 +3,7 @@ import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { androidSigning } from "./android-signing.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const project = join(root, "apps/mobile");
@@ -16,10 +17,31 @@ const sdk =
 const env = Object.fromEntries(
   Object.entries(process.env).filter(([key]) => !/token|secret|password|api.?key|auth/i.test(key)),
 );
-const result = spawnSync(process.execPath, [cli, ...process.argv.slice(2)], {
+const args = process.argv.slice(2);
+const release = args.includes("--release");
+if (release) {
+  const signing = androidSigning();
+  args.push(
+    "--key-store-path",
+    signing.path,
+    "--key-store-alias",
+    signing.alias,
+    "--key-store-password",
+    signing.password,
+    "--key-store-alias-password",
+    signing.password,
+  );
+}
+const result = spawnSync(process.execPath, [cli, ...args], {
   cwd: project,
   stdio: "inherit",
-  env: { ...env, ANDROID_HOME: sdk, ANDROID_SDK_ROOT: sdk, ROBIN_NATIVE_BUILD: "1" },
+  env: {
+    ...env,
+    ANDROID_HOME: sdk,
+    ANDROID_SDK_ROOT: sdk,
+    ROBIN_NATIVE_BUILD: "1",
+    ROBIN_RELEASE_BUILD: release ? "1" : "0",
+  },
 });
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);

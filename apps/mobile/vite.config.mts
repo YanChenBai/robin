@@ -7,5 +7,9 @@ export default defineConfig(async ({ mode }) => {
   // NativeScript's helper reads app metadata from cwd, so load it only in its CLI.
   if (!process.env.ROBIN_NATIVE_BUILD) return {};
   const { vueConfig } = await import("@nativescript/vite/vue");
-  return mergeConfig(vueConfig({ mode }), { resolve: { preserveSymlinks: false } });
+  const release = process.env.ROBIN_RELEASE_BUILD === "1";
+  return mergeConfig(vueConfig({ mode: release ? "production" : mode }), {
+    resolve: { preserveSymlinks: false },
+    ...(release ? { build: { sourcemap: false, minify: true } } : {}),
+  });
 });

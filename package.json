@@ -16,6 +16,7 @@
     "native:android": "oxnode scripts/build-android.ts",
     "mobile:dev": "vp run native:android && vp run mobile#dev",
     "mobile:build": "vp run native:android && vp run mobile#build",
+    "mobile:release": "vp run native:android && vp run mobile#release",
     "mobile:check": "vp run mobile#check"
   },
   "devDependencies": {

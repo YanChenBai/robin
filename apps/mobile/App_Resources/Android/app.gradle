@@ -2,6 +2,8 @@ android {
     defaultConfig {
         minSdkVersion 26
         targetSdkVersion 36
+        versionCode 1
+        versionName '0.1.0'
         ndk {
             // NativeScript 默认已加入所有架构，必须清空后再限制。
             abiFilters.clear()
