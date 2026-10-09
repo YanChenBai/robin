@@ -44,17 +44,16 @@ struct Runtime {
 // The audio stream is kept on its creating worker thread; JNI communicates with that worker.
 enum Command {
     Snapshot(std::sync::mpsc::Sender<String>),
-    Approve(bool),
+    Approve,
     Reject,
     Disconnect,
-    AutoReconnect(
-        String,
+    AutoConnect(
         bool,
         std::sync::mpsc::Sender<std::result::Result<(), String>>,
     ),
     DiscoveredDesktop(String, String, Option<std::net::SocketAddr>),
     Connect(String, Option<String>),
-    Buffer(u64, bool),
+    Buffer(u64, u64, bool),
     Pause(bool),
     Background(bool),
     Stop,
@@ -68,7 +67,7 @@ fn handle() -> &'static Mutex<Option<Handle>> {
     HANDLE.get_or_init(|| Mutex::new(None))
 }
 
-fn start(path: PathBuf, buffer_ms: u64, automatic: bool) -> Result<String> {
+fn start(path: PathBuf, buffer_ms: u64, background_buffer_ms: u64, automatic: bool) -> Result<String> {
     // 启停和离线设置共用句柄锁，避免旧服务退出时覆盖刚保存的偏好。
     let mut current = handle().lock().unwrap();
     anyhow::ensure!(current.is_none(), "receiver already started");
@@ -81,8 +80,10 @@ fn start(path: PathBuf, buffer_ms: u64, automatic: bool) -> Result<String> {
                 let identity = Identity::load(&path.join("identity.key"))?;
                 let history_path = path.join("connections.json");
                 let history = history::load(&history_path)?;
-                let (receiver, reader) = Receiver::start(identity, 4211, buffer_ms, history)?;
-                receiver.set_buffer(buffer_ms, automatic)?;
+                let auto_connect = history::load_auto_connect(&path.join("preferences.json"))?;
+                let (receiver, reader) =
+                    Receiver::start(identity, 4211, buffer_ms, background_buffer_ms, history, auto_connect)?;
+                receiver.set_buffer(buffer_ms, background_buffer_ms, automatic)?;
                 receiver.set_paused(true);
                 let stats = reader.stats().clone();
                 let mut stream = AudioStreamBuilder::default()
@@ -136,19 +137,20 @@ fn start(path: PathBuf, buffer_ms: u64, automatic: bool) -> Result<String> {
                         let _ = reply
                             .send(serde_json::to_string(&runtime.receiver.snapshot()).unwrap());
                     }
-                    Some(Command::Approve(remember)) => {
-                        let _ = runtime.receiver.approve(remember);
+                    Some(Command::Approve) => {
+                        let _ = runtime.receiver.approve();
                     }
                     Some(Command::Reject) => {
                         let _ = runtime.receiver.reject();
                     }
                     Some(Command::Disconnect) => runtime.receiver.disconnect(),
-                    Some(Command::AutoReconnect(fingerprint, enabled, reply)) => {
+                    Some(Command::AutoConnect(enabled, reply)) => {
                         let result = (|| -> Result<()> {
-                            let mut records = runtime.receiver.history();
-                            history::set_auto_reconnect(&mut records, &fingerprint, enabled)?;
-                            saved = history::save(&runtime.history_path, &records)?;
-                            runtime.receiver.set_auto_reconnect(&fingerprint, enabled);
+                            history::save_auto_connect(
+                                &runtime.history_path.with_file_name("preferences.json"),
+                                enabled,
+                            )?;
+                            runtime.receiver.set_auto_connect(enabled);
                             Ok(())
                         })();
                         let _ = reply.send(result.map_err(|error| error.to_string()));
@@ -171,8 +173,8 @@ fn start(path: PathBuf, buffer_ms: u64, automatic: bool) -> Result<String> {
                             runtime.receiver.report_error(error.to_string());
                         }
                     }
-                    Some(Command::Buffer(buffer_ms, automatic)) => {
-                        if let Err(error) = runtime.receiver.set_buffer(buffer_ms, automatic) {
+                    Some(Command::Buffer(buffer_ms, background_buffer_ms, automatic)) => {
+                        if let Err(error) = runtime.receiver.set_buffer(buffer_ms, background_buffer_ms, automatic) {
                             runtime.receiver.report_error(error.to_string());
                         }
                     }
@@ -264,11 +266,12 @@ pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeStart(
     _: JClass,
     path: JString,
     buffer_ms: jint,
+    background_buffer_ms: jint,
     automatic: jboolean,
 ) -> jstring {
     let result = (|| -> Result<String> {
         let path: String = env.get_string(&path)?.into();
-        start(PathBuf::from(path), buffer_ms as u64, automatic != 0)
+        start(PathBuf::from(path), buffer_ms as u64, background_buffer_ms as u64, automatic != 0)
     })();
     let value = result
         .unwrap_or_else(|e| serde_json::json!({"state":"error","error":e.to_string()}).to_string());
@@ -286,11 +289,15 @@ pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeSnapshot(
     let value = receiver
         .recv_timeout(std::time::Duration::from_millis(100))
         .unwrap_or_else(|_| {
-            let history = std::fs::read(PathBuf::from(directory).join("connections.json"))
+            let history = std::fs::read(PathBuf::from(&directory).join("connections.json"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Vec<ConnectionRecord>>(&bytes).ok())
                 .unwrap_or_default();
-            serde_json::json!({"state":"stopped", "history":history}).to_string()
+            let auto_connect = history::load_auto_connect(&PathBuf::from(directory).join("preferences.json"));
+            match auto_connect {
+                Ok(enabled) => serde_json::json!({"state":"stopped", "history":history, "autoConnect":enabled}).to_string(),
+                Err(error) => serde_json::json!({"state":"error", "history":history, "error":error.to_string()}).to_string(),
+            }
         });
     text(&mut env, value)
 }
@@ -298,9 +305,8 @@ pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeSnapshot(
 pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeApprove(
     _: JNIEnv,
     _: JClass,
-    remember: jboolean,
 ) {
-    command(Command::Approve(remember != 0));
+    command(Command::Approve);
 }
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeReject(_: JNIEnv, _: JClass) {
@@ -311,29 +317,26 @@ pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeDisconnect(_: JNIEn
     command(Command::Disconnect);
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeSetAutoReconnect(
+pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeSetAutoConnect(
     mut env: JNIEnv,
     _: JClass,
     directory: JString,
-    fingerprint: JString,
     enabled: jboolean,
 ) {
     let result = (|| -> Result<()> {
         let directory: String = env.get_string(&directory)?.into();
-        let fingerprint: String = env.get_string(&fingerprint)?.into();
         let current = handle().lock().unwrap();
         if let Some(current) = current.as_ref() {
             let (reply, response) = std::sync::mpsc::channel();
             current
                 .sender
-                .send(Command::AutoReconnect(fingerprint, enabled != 0, reply))?;
+                .send(Command::AutoConnect(enabled != 0, reply))?;
             response
                 .recv_timeout(std::time::Duration::from_secs(2))?
                 .map_err(anyhow::Error::msg)?;
         } else {
-            history::update_auto_reconnect(
-                &PathBuf::from(directory).join("connections.json"),
-                &fingerprint,
+            history::save_auto_connect(
+                &PathBuf::from(directory).join("preferences.json"),
                 enabled != 0,
             )?;
         }
@@ -378,9 +381,10 @@ pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativeBuffer(
     _: JNIEnv,
     _: JClass,
     buffer_ms: jint,
+    background_buffer_ms: jint,
     automatic: jboolean,
 ) {
-    command(Command::Buffer(buffer_ms as u64, automatic != 0));
+    command(Command::Buffer(buffer_ms as u64, background_buffer_ms as u64, automatic != 0));
 }
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_robin_audio_RobinAudio_nativePause(

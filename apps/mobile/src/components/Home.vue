@@ -8,7 +8,7 @@ import {
   connect,
   disconnect,
   reject,
-  setAutoReconnect,
+  setAutoConnect,
   setBuffer,
   setPaused,
   snapshot,
@@ -27,8 +27,8 @@ if (ApplicationSettings.getNumber("settingsVersion", 0) < 1) {
 
 const current = ref<ReceiverSnapshot>({ state: "stopped" });
 const tab = ref<"player" | "settings">("player");
-const remember = ref(true);
 const bufferMs = ref(ApplicationSettings.getNumber("bufferMs", 20));
+const backgroundBufferMs = ref(ApplicationSettings.getNumber("backgroundBufferMs", 20));
 const automatic = ref(ApplicationSettings.getBoolean("autoBuffer", false));
 const autoStart = ref(ApplicationSettings.getBoolean("autoStart", true));
 const ip = ref(ApplicationSettings.getString("computerIp", ""));
@@ -76,7 +76,7 @@ const loading = computed(
   () =>
     !!connectionRequest.value ||
     starting.value ||
-    ["connecting", "buffering"].includes(current.value.state),
+    current.value.state === "connecting",
 );
 const waveform = computed(() =>
   Array.from({ length: 32 }, (_, ix) => {
@@ -107,7 +107,7 @@ function initializePage() {
   navigationIcons.value = icons;
   refresh();
   if (autoStart.value && current.value.state === "stopped") start();
-  if (active.value && !starting.value) setBuffer(bufferMs.value, automatic.value);
+  if (active.value && !starting.value) setBuffer(bufferMs.value, backgroundBufferMs.value, automatic.value);
   resumePolling();
 }
 const pageTitle = computed(() => (tab.value === "player" ? "播放" : "设置"));
@@ -178,7 +178,7 @@ function start() {
   if (starting.value || active.value) return;
   try {
     starting.value = true;
-    startReceiver(bufferMs.value, automatic.value);
+    startReceiver(bufferMs.value, backgroundBufferMs.value, automatic.value);
   } catch (error) {
     starting.value = false;
     current.value = { ...current.value, state: "error", error: String(error) };
@@ -189,16 +189,19 @@ function stop() {
   connectionRequest.value = undefined;
   stopReceiver();
 }
-function configureBuffer(value: number, auto = automatic.value) {
+function configureBuffer(value: number, auto = automatic.value, background = backgroundBufferMs.value) {
   const next = Math.min(100, Math.max(5, Math.round(value)));
-  if (next === bufferMs.value && auto === automatic.value) return;
+  const nextBackground = Math.min(100, Math.max(5, Math.round(background)));
+  if (next === bufferMs.value && nextBackground === backgroundBufferMs.value && auto === automatic.value) return;
   bufferMs.value = next;
+  backgroundBufferMs.value = nextBackground;
   automatic.value = auto;
   ApplicationSettings.setNumber("bufferMs", next);
+  ApplicationSettings.setNumber("backgroundBufferMs", nextBackground);
   ApplicationSettings.setBoolean("autoBuffer", auto);
   if (bufferUpdate) clearTimeout(bufferUpdate);
   bufferUpdate = setTimeout(() => {
-    if (active.value) setBuffer(next, auto);
+    if (active.value) setBuffer(bufferMs.value, backgroundBufferMs.value, automatic.value);
   }, 150);
 }
 function changeAutoStart(value: boolean) {
@@ -241,7 +244,7 @@ function connectComputer(record?: ConnectionRecord) {
     previousError: current.value.error ?? "",
   };
   try {
-    connect(address, record?.fingerprint ?? "", bufferMs.value, automatic.value);
+    connect(address, record?.fingerprint ?? "", bufferMs.value, backgroundBufferMs.value, automatic.value);
     tab.value = "player";
   } catch (error) {
     connectionRequest.value = undefined;
@@ -250,7 +253,7 @@ function connectComputer(record?: ConnectionRecord) {
   }
 }
 function allow() {
-  approve(remember.value);
+  approve();
   refresh();
 }
 function decline() {
@@ -264,10 +267,10 @@ function disconnectComputer() {
 function togglePlayback() {
   setPaused(!current.value.paused);
 }
-function changeReconnect(record: ConnectionRecord, enabled: boolean) {
-  if (record.autoReconnect === enabled) return;
+function changeAutoConnect(enabled: boolean) {
+  if (current.value.autoConnect === undefined || current.value.autoConnect === enabled) return;
   try {
-    setAutoReconnect(record.fingerprint, enabled);
+    setAutoConnect(enabled);
     formError.value = "";
     refresh();
   } catch (error) {
@@ -313,10 +316,6 @@ onUnmounted(() => {
               <Label :text="current.peerName" class="computer-name" textWrap="true" />
               <Label :text="current.code" class="code" />
               <Label text="核对电脑上的连接代码一致后再允许" class="subtle" textWrap="true" />
-              <GridLayout columns="*, auto" class="setting-row">
-                <Label col="0" text="下次自动连接这台电脑" textWrap="true" />
-                <Switch col="1" v-model="remember" accessibilityLabel="下次自动连接这台电脑" />
-              </GridLayout>
               <GridLayout columns="*, *">
                 <ActionButton col="0" label="拒绝" icon="close" @tap="decline" />
                 <ActionButton col="1" label="允许播放" icon="check" primary @tap="allow" />
@@ -443,15 +442,6 @@ onUnmounted(() => {
                       "
                     />
                   </GridLayout>
-                  <GridLayout columns="*, auto" class="record-preference">
-                    <Label col="0" text="自动连接" class="subtle" />
-                    <Switch
-                      col="1"
-                      :checked="item.autoReconnect"
-                      :accessibilityLabel="`自动连接 ${item.name}`"
-                      @checkedChange="changeReconnect(item, $event.value)"
-                    />
-                  </GridLayout>
                 </StackLayout>
               </StackLayout>
               <StackLayout class="section-divider connection-details">
@@ -506,6 +496,19 @@ onUnmounted(() => {
                     @checkedChange="changeAutoStart($event.value)"
                   />
                 </GridLayout>
+                <GridLayout columns="*, auto" class="setting-row">
+                  <StackLayout col="0" class="setting-copy">
+                    <Label text="自动连接" class="setting-label" />
+                    <Label text="接收开启时自动连接已授权电脑，异常掉线后自动重连" class="hint" textWrap="true" />
+                  </StackLayout>
+                  <Switch
+                    col="1"
+                    :checked="current.autoConnect ?? true"
+                    :isEnabled="current.autoConnect !== undefined"
+                    accessibilityLabel="自动连接"
+                    @checkedChange="changeAutoConnect($event.value)"
+                  />
+                </GridLayout>
               </StackLayout>
               <StackLayout class="settings-group section-divider">
                 <Label text="播放" class="section-title" />
@@ -523,7 +526,7 @@ onUnmounted(() => {
                 </GridLayout>
                 <GridLayout columns="*, auto" class="setting-row">
                   <StackLayout col="0" class="setting-copy">
-                    <Label :text="automatic ? '最小接收缓冲' : '接收缓冲'" class="setting-label" />
+                    <Label :text="automatic ? '前台最小接收缓冲' : '前台接收缓冲'" class="setting-label" />
                     <Label text="可在播放中调整，较大缓冲更稳定" class="hint" textWrap="true" />
                   </StackLayout>
                   <Label col="1" :text="`${bufferMs} ms`" class="buffer-value" />
@@ -534,6 +537,24 @@ onUnmounted(() => {
                   maxValue="100"
                   accessibilityLabel="接收缓冲毫秒数"
                   @valueChange="configureBuffer($event.value)"
+                />
+                <GridLayout columns="*, *">
+                  <Label col="0" text="低延迟 · 5 ms" class="hint" />
+                  <Label col="1" text="更稳定 · 100 ms" class="hint" textAlignment="right" />
+                </GridLayout>
+                <GridLayout columns="*, auto" class="setting-row">
+                  <StackLayout col="0" class="setting-copy">
+                    <Label :text="automatic ? '后台最小接收缓冲' : '后台接收缓冲'" class="setting-label" />
+                    <Label text="切后台或息屏时使用，默认 20 ms" class="hint" textWrap="true" />
+                  </StackLayout>
+                  <Label col="1" :text="`${backgroundBufferMs} ms`" class="buffer-value" />
+                </GridLayout>
+                <Slider
+                  :value="backgroundBufferMs"
+                  minValue="5"
+                  maxValue="100"
+                  accessibilityLabel="后台接收缓冲毫秒数"
+                  @valueChange="configureBuffer(bufferMs, automatic, $event.value)"
                 />
                 <GridLayout columns="*, *">
                   <Label col="0" text="低延迟 · 5 ms" class="hint" />

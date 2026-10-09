@@ -21,13 +21,13 @@ public final class RobinAudio {
         loaded = true;
     }
 
-    public static void start(Context context, int bufferMs, boolean automatic) {
+    public static void start(Context context, int bufferMs, int backgroundBufferMs, boolean automatic) {
         application = context.getApplicationContext();
         ensureLoaded();
-        if (bufferMs < 5 || bufferMs > 100) throw new IllegalArgumentException("Buffer must be 5–100 ms");
+        if (bufferMs < 5 || bufferMs > 100 || backgroundBufferMs < 5 || backgroundBufferMs > 100) throw new IllegalArgumentException("Buffer must be 5–100 ms");
         serviceError = "";
         Intent intent = new Intent(context, RobinAudioService.class);
-        intent.putExtra("bufferMs", bufferMs).putExtra("automatic", automatic);
+        intent.putExtra("bufferMs", bufferMs).putExtra("backgroundBufferMs", backgroundBufferMs).putExtra("automatic", automatic);
         if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
         else context.startService(intent);
     }
@@ -44,30 +44,30 @@ public final class RobinAudio {
     }
     public static void initialize(Context context) { application = context.getApplicationContext(); ensureLoaded(); }
     private static String directory() { return application.getFilesDir().getAbsolutePath() + "/robin"; }
-    public static void connect(Context context, String address, String fingerprint, int bufferMs, boolean automatic) {
+    public static void connect(Context context, String address, String fingerprint, int bufferMs, int backgroundBufferMs, boolean automatic) {
         initialize(context);
         serviceError = "";
         Intent intent = new Intent(context, RobinAudioService.class).setAction("connect");
-        intent.putExtra("address", address).putExtra("fingerprint", fingerprint).putExtra("bufferMs", bufferMs).putExtra("automatic", automatic);
+        intent.putExtra("address", address).putExtra("fingerprint", fingerprint).putExtra("bufferMs", bufferMs).putExtra("backgroundBufferMs", backgroundBufferMs).putExtra("automatic", automatic);
         context.startForegroundService(intent);
     }
     public static void pause(Context context, boolean paused) {
         context.startService(new Intent(context, RobinAudioService.class).setAction(paused ? "pause" : "play"));
     }
     public static native void nativeConnect(String address, String fingerprint);
-    public static native void nativeBuffer(int bufferMs, boolean automatic);
+    public static native void nativeBuffer(int bufferMs, int backgroundBufferMs, boolean automatic);
     public static native void nativePause(boolean paused);
     public static native void nativeBackground(boolean background);
-    public static native String nativeStart(String directory, int bufferMs, boolean automatic);
+    public static native String nativeStart(String directory, int bufferMs, int backgroundBufferMs, boolean automatic);
     public static native String nativeSnapshot(String directory);
-    public static native void nativeApprove(boolean remember);
+    public static native void nativeApprove();
     public static native void nativeReject();
     public static native void nativeDisconnect();
-    public static void nativeAutoReconnect(String fingerprint, boolean enabled) {
+    public static void nativeAutoConnect(boolean enabled) {
         ensureLoaded();
-        nativeSetAutoReconnect(directory(), fingerprint, enabled);
+        nativeSetAutoConnect(directory(), enabled);
     }
-    private static native void nativeSetAutoReconnect(String directory, String fingerprint, boolean enabled);
+    private static native void nativeSetAutoConnect(String directory, boolean enabled);
     public static native void nativeDiscoveredDesktop(String service, String fingerprint, String address);
     public static native void nativeStop();
 }

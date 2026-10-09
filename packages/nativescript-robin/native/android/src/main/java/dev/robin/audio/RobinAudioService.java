@@ -151,10 +151,11 @@ public final class RobinAudioService extends Service {
         if (!started) {
             started = true;
             final int bufferMs = intent == null ? 20 : intent.getIntExtra("bufferMs", 20);
+            final int backgroundBufferMs = intent == null ? 20 : intent.getIntExtra("backgroundBufferMs", 20);
             final boolean automatic = intent != null && intent.getBooleanExtra("automatic", false);
             worker.execute(() -> {
                 try {
-                    JSONObject snapshot = new JSONObject(RobinAudio.nativeStart(getFilesDir().getAbsolutePath() + "/robin", bufferMs, automatic));
+                    JSONObject snapshot = new JSONObject(RobinAudio.nativeStart(getFilesDir().getAbsolutePath() + "/robin", bufferMs, backgroundBufferMs, automatic));
                     RobinAudio.nativeBackground(background);
                     if (snapshot.optString("state").equals("error")) throw new IllegalStateException(snapshot.optString("error"));
                     if (!destroyed) advertise(snapshot.getInt("port"));

@@ -30,6 +30,8 @@ pub struct ReceiverSnapshot {
     pub port: u16,
     pub buffer_ms: u64,
     pub buffer_floor_ms: u64,
+    pub foreground_buffer_ms: u64,
+    pub background_buffer_ms: u64,
     pub queued_ms: f64,
     pub jitter_queued_ms: f64,
     pub network_rtt_ms: Option<f64>,
@@ -42,6 +44,7 @@ pub struct ReceiverSnapshot {
     pub output_frames: u64,
     pub history: Vec<ConnectionRecord>,
     pub auto_buffer: bool,
+    pub auto_connect: bool,
     pub background: bool,
     pub paused: bool,
     pub waveform: Vec<f32>,
@@ -53,7 +56,6 @@ pub struct ReceiverSnapshot {
 pub struct ConnectionRecord {
     pub fingerprint: String,
     pub name: String,
-    pub auto_reconnect: bool,
     #[serde(default)]
     pub address: String,
 }
@@ -185,7 +187,7 @@ impl PlaybackReader {
 }
 
 enum Decision {
-    Allow(bool),
+    Allow,
     Reject,
 }
 
@@ -195,6 +197,7 @@ pub struct Receiver {
     pending: Arc<Mutex<Option<mpsc::Sender<Decision>>>>,
     stop: Arc<AtomicBool>,
     disconnect: Arc<AtomicBool>,
+    reconnect_suspended: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
     connect: mpsc::Sender<(SocketAddr, Option<String>, ConnectionIntent)>,
     discovered: Arc<Mutex<BTreeMap<String, (String, SocketAddr)>>>,
@@ -205,9 +208,12 @@ impl Receiver {
         identity: Identity,
         port: u16,
         buffer_ms: u64,
+        background_buffer_ms: u64,
         history: Vec<ConnectionRecord>,
+        auto_connect: bool,
     ) -> Result<(Self, PlaybackReader)> {
         PlayoutBuffer::new(buffer_ms)?;
+        PlayoutBuffer::new(background_buffer_ms)?;
         let listener = TcpListener::bind(("0.0.0.0", port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -216,8 +222,11 @@ impl Receiver {
             port,
             buffer_ms,
             buffer_floor_ms: buffer_ms,
+            foreground_buffer_ms: buffer_ms,
+            background_buffer_ms,
             history,
             auto_buffer: false,
+            auto_connect,
             ..Default::default()
         }));
         let stats = Arc::new(PlaybackStats {
@@ -227,6 +236,7 @@ impl Receiver {
         let pending = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let disconnect = Arc::new(AtomicBool::new(false));
+        let reconnect_suspended = Arc::new(AtomicBool::new(false));
         let (mut producer, consumer) = RingBuffer::new(SAMPLE_RATE as usize / 5);
         let (connect, connections) =
             mpsc::channel::<(SocketAddr, Option<String>, ConnectionIntent)>();
@@ -234,6 +244,7 @@ impl Receiver {
         let worker_pending = pending.clone();
         let worker_stop = stop.clone();
         let worker_disconnect = disconnect.clone();
+        let worker_suspended = reconnect_suspended.clone();
         let worker_stats = stats.clone();
         let discovered = Arc::new(Mutex::new(BTreeMap::<String, (String, SocketAddr)>::new()));
         let worker_discovered = discovered.clone();
@@ -259,10 +270,12 @@ impl Receiver {
                             }
                             retry_at = Instant::now() + Duration::from_secs(3);
                             let snapshot = worker_state.lock().unwrap();
+                            if !snapshot.auto_connect || worker_suspended.load(Ordering::Acquire) {
+                                return None;
+                            }
                             let records = snapshot
                                 .history
                                 .iter()
-                                .filter(|r| r.auto_reconnect)
                                 .collect::<Vec<_>>();
                             if records.is_empty() {
                                 return None;
@@ -284,6 +297,12 @@ impl Receiver {
                         .as_ref()
                         .map(|(_, _, intent)| *intent)
                         .unwrap_or(ConnectionIntent::Manual);
+                    if intent == ConnectionIntent::Resume
+                        && (!worker_state.lock().unwrap().auto_connect
+                            || worker_suspended.load(Ordering::Acquire))
+                    {
+                        continue;
+                    }
                     let connection = if let Some(socket) = incoming {
                         worker_disconnect.store(false, Ordering::Release);
                         Some(socket.and_then(|socket| SecureControl::accept(socket, &identity)))
@@ -326,7 +345,7 @@ impl Receiver {
                             control,
                             &worker_state,
                             &worker_pending,
-                            (&worker_stop, &worker_disconnect),
+                            (&worker_stop, &worker_disconnect, &worker_suspended),
                             &mut producer,
                             &worker_stats,
                             intent,
@@ -344,11 +363,7 @@ impl Receiver {
                     snapshot.capture_period_ms = None;
                     snapshot.estimated_latency_ms = None;
                     snapshot.jitter_queued_ms = 0.0;
-                    snapshot.buffer_ms = if snapshot.background {
-                        snapshot.buffer_floor_ms.max(50)
-                    } else {
-                        snapshot.buffer_floor_ms
-                    };
+                    snapshot.buffer_ms = snapshot.buffer_floor_ms;
                     worker_stats.target_frames.store(
                         (SAMPLE_RATE as u64 * snapshot.buffer_ms / 1000) as usize,
                         Ordering::Release,
@@ -367,6 +382,7 @@ impl Receiver {
                 pending,
                 stop,
                 disconnect,
+                reconnect_suspended,
                 worker: Some(worker),
                 connect,
                 discovered,
@@ -426,8 +442,8 @@ impl Receiver {
     pub fn report_error(&self, error: String) {
         self.state.lock().unwrap().error = error;
     }
-    pub fn approve(&self, remember: bool) -> Result<()> {
-        self.decide(Decision::Allow(remember))
+    pub fn approve(&self) -> Result<()> {
+        self.decide(Decision::Allow)
     }
     pub fn reject(&self) -> Result<()> {
         self.decide(Decision::Reject)
@@ -444,25 +460,16 @@ impl Receiver {
             .map_err(|_| anyhow::anyhow!("connection request expired"))
     }
     pub fn disconnect(&self) {
-        // 主动断开停用自动连接，保留已经允许过的电脑记录。
-        let mut snapshot = self.state.lock().unwrap();
-        let fingerprint = snapshot.fingerprint.clone();
-        for record in &mut snapshot.history {
-            if record.fingerprint == fingerprint {
-                record.auto_reconnect = false;
-            }
-        }
+        // 手动断开仅暂停当前接收期间的自动连接，不修改持久设置。
+        let _snapshot = self.state.lock().unwrap();
+        self.reconnect_suspended.store(true, Ordering::Release);
         self.disconnect.store(true, Ordering::Release);
         if let Some(sender) = self.pending.lock().unwrap().take() {
             let _ = sender.send(Decision::Reject);
         }
     }
-    pub fn set_auto_reconnect(&self, fingerprint: &str, enabled: bool) {
-        for record in &mut self.state.lock().unwrap().history {
-            if record.fingerprint == fingerprint {
-                record.auto_reconnect = enabled;
-            }
-        }
+    pub fn set_auto_connect(&self, enabled: bool) {
+        self.state.lock().unwrap().auto_connect = enabled;
     }
     /// 发现结果只提供候选地址，实际连接仍须通过已保存指纹验证。
     pub fn update_discovered_desktop(
@@ -490,6 +497,7 @@ impl Receiver {
             address.port() != 0 && !address.ip().is_unspecified(),
             "请输入有效的电脑 IP 和端口"
         );
+        self.reconnect_suspended.store(false, Ordering::Release);
         self.connect
             .send((address, fingerprint, ConnectionIntent::Manual))
             .map_err(|_| anyhow::anyhow!("接收已关闭"))?;
@@ -497,15 +505,17 @@ impl Receiver {
         snapshot.error.clear();
         Ok(())
     }
-    pub fn set_buffer(&self, buffer_ms: u64, automatic: bool) -> Result<()> {
+    pub fn set_buffer(&self, buffer_ms: u64, background_buffer_ms: u64, automatic: bool) -> Result<()> {
         PlayoutBuffer::new(buffer_ms)?;
+        PlayoutBuffer::new(background_buffer_ms)?;
         let mut state = self.state.lock().unwrap();
-        state.buffer_floor_ms = buffer_ms;
-        state.buffer_ms = if state.background {
-            buffer_ms.max(50)
-        } else {
-            buffer_ms
-        };
+        state.foreground_buffer_ms = buffer_ms;
+        state.background_buffer_ms = background_buffer_ms;
+        let floor = if state.background { background_buffer_ms } else { buffer_ms };
+        if state.buffer_floor_ms != floor || state.auto_buffer != automatic {
+            state.buffer_ms = floor;
+        }
+        state.buffer_floor_ms = floor;
         state.auto_buffer = automatic;
         self.stats.target_frames.store(
             (SAMPLE_RATE as u64 * state.buffer_ms / 1000) as usize,
@@ -516,12 +526,11 @@ impl Receiver {
     pub fn set_background(&self, background: bool) {
         let mut state = self.state.lock().unwrap();
         state.background = background;
-        // 后台网络调度存在额外抖动；前台恢复用户设置，不改写保存的下限。
-        state.buffer_ms = if background {
-            state.buffer_floor_ms.max(50)
-        } else {
-            state.buffer_floor_ms
-        };
+        let floor = if background { state.background_buffer_ms } else { state.foreground_buffer_ms };
+        if state.buffer_floor_ms != floor {
+            state.buffer_ms = floor;
+        }
+        state.buffer_floor_ms = floor;
         self.stats.target_frames.store(
             (SAMPLE_RATE as u64 * state.buffer_ms / 1000) as usize,
             Ordering::Release,
@@ -591,12 +600,12 @@ fn receive_session(
     mut control: SecureControl,
     state: &Arc<Mutex<ReceiverSnapshot>>,
     pending: &Arc<Mutex<Option<mpsc::Sender<Decision>>>>,
-    cancellation: (&Arc<AtomicBool>, &Arc<AtomicBool>),
+    cancellation: (&Arc<AtomicBool>, &Arc<AtomicBool>, &Arc<AtomicBool>),
     producer: &mut Producer<StereoFrame>,
     stats: &Arc<PlaybackStats>,
     intent: ConnectionIntent,
 ) -> Result<()> {
-    let (stop, disconnect) = cancellation;
+    let (stop, disconnect, reconnect_suspended) = cancellation;
     let (name, control_port) = match control.receive()? {
         Message::Hello {
             name,
@@ -606,6 +615,12 @@ fn receive_session(
         _ => bail!("unsupported connection request"),
     };
     let fingerprint = control.fingerprint().to_owned();
+    if intent == ConnectionIntent::Resume {
+        ensure!(
+            state.lock().unwrap().auto_connect && !reconnect_suspended.load(Ordering::Acquire),
+            "automatic connection paused"
+        );
+    }
     control.send(&Message::Request { intent })?;
     match control.receive()? {
         Message::Ready => {}
@@ -613,17 +628,20 @@ fn receive_session(
             session_id,
             reason: StopReason::UserDisconnect,
         } if session_id == control.session_id() => {
-            for record in &mut state.lock().unwrap().history {
-                if record.fingerprint == fingerprint {
-                    record.auto_reconnect = false;
-                }
-            }
+            reconnect_suspended.store(true, Ordering::Release);
             control.send(&Message::Stopped { session_id })?;
             return Ok(());
         }
         _ => bail!("电脑未允许连接"),
     }
-    // 记录仅在允许连接后保存，授权与自动连接偏好分别处理。
+    // 自动尝试不会清除手动断开的标记；已在途的尝试也必须重新检查。
+    if intent == ConnectionIntent::Resume {
+        ensure!(
+            state.lock().unwrap().auto_connect && !reconnect_suspended.load(Ordering::Acquire),
+            "automatic connection paused"
+        );
+    }
+    // 记录仅在允许连接后保存。
     let remembered = state
         .lock()
         .unwrap()
@@ -648,8 +666,8 @@ fn receive_session(
     control.send(&Message::Pending {
         code: control.code().to_owned(),
     })?;
-    let decision = if let Some(record) = remembered {
-        Decision::Allow(record.auto_reconnect)
+    let decision = if remembered.is_some() {
+        Decision::Allow
     } else {
         rx.recv_timeout(Duration::from_secs(30))
             .unwrap_or(Decision::Reject)
@@ -659,8 +677,8 @@ fn receive_session(
         !stop.load(Ordering::Acquire) && !disconnect.load(Ordering::Acquire),
         "connection cancelled"
     );
-    let remember = match decision {
-        Decision::Allow(remember) => remember,
+    match decision {
+        Decision::Allow => {}
         Decision::Reject => {
             control.send(&Message::Reject {
                 reason: "手机未允许连接".into(),
@@ -668,6 +686,21 @@ fn receive_session(
             return Ok(());
         }
     };
+    {
+        let snapshot = state.lock().unwrap();
+        ensure!(
+            !stop.load(Ordering::Acquire) && !disconnect.load(Ordering::Acquire),
+            "connection cancelled"
+        );
+        if intent == ConnectionIntent::Resume {
+            ensure!(
+                snapshot.auto_connect && !reconnect_suspended.load(Ordering::Acquire),
+                "automatic connection paused"
+            );
+        } else {
+            reconnect_suspended.store(false, Ordering::Release);
+        }
+    }
     let udp = UdpSocket::bind("0.0.0.0:0")?;
     udp.set_read_timeout(Some(Duration::from_millis(1)))?;
     let key = session_key();
@@ -685,7 +718,6 @@ fn receive_session(
             ConnectionRecord {
                 fingerprint,
                 name,
-                auto_reconnect: remember,
                 address: control_port
                     .filter(|port| *port > 0)
                     .map(|port| {
@@ -709,6 +741,7 @@ fn receive_session(
     let global_stop = stop.clone();
     let manual_stop = disconnect.clone();
     let control_state = state.clone();
+    let control_suspended = reconnect_suspended.clone();
     let heartbeat = thread::spawn(move || {
         let session_id = control.session_id().to_owned();
         loop {
@@ -773,13 +806,7 @@ fn receive_session(
                     reason,
                 }) if response == session_id => {
                     if reason == StopReason::UserDisconnect {
-                        let mut snapshot = control_state.lock().unwrap();
-                        let fingerprint = snapshot.fingerprint.clone();
-                        for record in &mut snapshot.history {
-                            if record.fingerprint == fingerprint {
-                                record.auto_reconnect = false;
-                            }
-                        }
+                        control_suspended.store(true, Ordering::Release);
                     }
                     let _ = control.send(&Message::Stopped {
                         session_id: response,
@@ -823,14 +850,10 @@ fn receive_session(
         let now = Instant::now();
         {
             let mut snapshot = state.lock().unwrap();
-            adaptation.floor = if snapshot.background {
-                snapshot.buffer_floor_ms.max(50)
-            } else {
-                snapshot.buffer_floor_ms
-            };
+            adaptation.floor = snapshot.buffer_floor_ms;
             let adjusted = adaptation.update(
                 snapshot.buffer_ms,
-                snapshot.auto_buffer || snapshot.background,
+                snapshot.auto_buffer,
                 stats.underruns.load(Ordering::Relaxed),
                 playout.late(),
                 now,
@@ -919,7 +942,6 @@ mod playback_tests {
         let record = ConnectionRecord {
             fingerprint: "a".repeat(64),
             name: "Desktop".into(),
-            auto_reconnect: true,
             address: "192.168.1.2:4212".into(),
         };
         let discovered = BTreeMap::from([
@@ -964,13 +986,12 @@ mod playback_tests {
         let history = vec![ConnectionRecord {
             fingerprint: fingerprint.clone(),
             name: "Desktop".into(),
-            auto_reconnect: true,
             address: "127.0.0.1:1".into(),
         }];
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
-        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, history).unwrap();
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, history, true).unwrap();
         receiver.update_discovered_desktop("desktop".into(), fingerprint.clone(), Some(address));
         let accepted = Arc::new(AtomicBool::new(false));
         let server_accepted = accepted.clone();
@@ -1022,7 +1043,7 @@ mod playback_tests {
             }
         });
         wait_for_timeout(Duration::from_secs(15), || accepted.load(Ordering::Acquire));
-        wait_for(|| !receiver.history()[0].auto_reconnect);
+        wait_for(|| receiver.reconnect_suspended.load(Ordering::Acquire));
         server.join().unwrap();
         assert_eq!(receiver.history()[0].address, address.to_string());
         assert_eq!(receiver.history()[0].fingerprint, fingerprint);
@@ -1065,27 +1086,30 @@ mod playback_tests {
     }
 
     #[test]
-    fn closing_and_disconnecting_keep_authorization_but_disconnect_disables_auto_reconnect() {
+    fn closing_and_disconnecting_preserve_global_preference_and_authorization() {
         let dir = tempfile::tempdir().unwrap();
         let identity = Identity::load(&dir.path().join("identity")).unwrap();
         let record = ConnectionRecord {
             fingerprint: "trusted".into(),
             name: "Computer".into(),
-            auto_reconnect: true,
             address: String::new(),
         };
         let (mut receiver, _reader) =
-            Receiver::start(identity.clone(), 0, 20, vec![record]).unwrap();
+            Receiver::start(identity.clone(), 0, 20, 20, vec![record], true).unwrap();
         assert!(!receiver.snapshot().auto_buffer);
         receiver.state.lock().unwrap().fingerprint = "trusted".into();
         receiver.stop();
         let serialized = serde_json::to_vec(&receiver.history()).unwrap();
         let history = serde_json::from_slice(&serialized).unwrap();
-        let (mut reopened, _reader) = Receiver::start(identity, 0, 20, history).unwrap();
-        assert!(reopened.history()[0].auto_reconnect);
+        let (mut reopened, _reader) = Receiver::start(identity, 0, 20, 20, history, true).unwrap();
+        assert!(reopened.snapshot().auto_connect);
         reopened.state.lock().unwrap().fingerprint = "trusted".into();
         reopened.disconnect();
-        assert!(!reopened.history()[0].auto_reconnect);
+        assert!(reopened.snapshot().auto_connect);
+        assert!(reopened.reconnect_suspended.load(Ordering::Acquire));
+        reopened.set_auto_connect(false);
+        reopened.set_auto_connect(true);
+        assert!(reopened.reconnect_suspended.load(Ordering::Acquire));
         reopened.stop();
         assert_eq!(reopened.history().len(), 1);
     }
@@ -1163,15 +1187,15 @@ mod playback_tests {
                 })
                 .unwrap();
         });
-        let (mut receiver, mut reader) = Receiver::start(phone.clone(), 0, 20, Vec::new()).unwrap();
+        let (mut receiver, mut reader) = Receiver::start(phone.clone(), 0, 20, 20, Vec::new(), true).unwrap();
         receiver.connect(address, None).unwrap();
         wait_for(|| receiver.snapshot().state == "pending");
         assert_eq!(receiver.snapshot().peer_name, "Test computer");
-        receiver.approve(true).unwrap();
+        receiver.approve().unwrap();
         wait_for(|| !receiver.history().is_empty());
         assert_eq!(receiver.history()[0].address, address.to_string());
-        receiver.set_buffer(25, false).unwrap();
-        assert!(receiver.set_buffer(101, false).is_err());
+        receiver.set_buffer(25, 20, false).unwrap();
+        assert!(receiver.set_buffer(101, 20, false).is_err());
         step.send(()).unwrap();
         wait_for(|| receiver.snapshot().received == 32);
         let mut output = [(0, 0); 192];
@@ -1192,12 +1216,11 @@ mod playback_tests {
         step.send(()).unwrap();
         server.join().unwrap();
         receiver.stop();
-        assert!(receiver.history()[0].auto_reconnect);
+        assert!(receiver.snapshot().auto_connect);
         let mut history = receiver.history();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         history[0].address = address.to_string();
-        history[0].auto_reconnect = false;
         let server = thread::spawn(move || {
             let mut control =
                 SecureControl::accept(listener.accept().unwrap().0, &remembered_desktop).unwrap();
@@ -1228,16 +1251,15 @@ mod playback_tests {
                 })
                 .unwrap();
         });
-        let (mut reopened, _reader) = Receiver::start(phone.clone(), 0, 20, history).unwrap();
+        let (mut reopened, _reader) = Receiver::start(phone.clone(), 0, 20, 20, history, false).unwrap();
         reopened
             .connect(address, Some(receiver.history()[0].fingerprint.clone()))
             .unwrap();
         server.join().unwrap();
         reopened.stop();
         assert_eq!(reopened.history()[0].name, "Remembered computer");
-        assert!(!reopened.history()[0].auto_reconnect);
+        assert!(!reopened.snapshot().auto_connect);
         let mut history = reopened.history();
-        history[0].auto_reconnect = true;
         let impostor = Identity::load(&dir.path().join("different-desktop")).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let impostor_address = listener.local_addr().unwrap();
@@ -1248,7 +1270,7 @@ mod playback_tests {
                 SecureControl::accept(listener.accept().unwrap().0, &impostor).unwrap();
             assert!(control.receive().is_err());
         });
-        let (mut guarded, _reader) = Receiver::start(phone, 0, 20, history).unwrap();
+        let (mut guarded, _reader) = Receiver::start(phone, 0, 20, 20, history, true).unwrap();
         guarded.update_discovered_desktop(
             "spoofed-discovery".into(),
             expected,
@@ -1267,7 +1289,7 @@ mod playback_tests {
         let dir = tempfile::tempdir().unwrap();
         let desktop = Identity::load(&dir.path().join("desktop")).unwrap();
         let phone = Identity::load(&dir.path().join("phone")).unwrap();
-        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, Vec::new()).unwrap();
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, Vec::new(), true).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -1306,11 +1328,12 @@ mod playback_tests {
         });
         receiver.connect(address, None).unwrap();
         wait_for(|| receiver.snapshot().state == "pending");
-        receiver.approve(true).unwrap();
+        receiver.approve().unwrap();
         let listener = server.join().unwrap();
         wait_for(|| receiver.snapshot().state == "waiting");
         assert_eq!(receiver.history().len(), 1);
-        assert!(!receiver.history()[0].auto_reconnect);
+        assert!(receiver.snapshot().auto_connect);
+        assert!(receiver.reconnect_suspended.load(Ordering::Acquire));
         listener.set_nonblocking(true).unwrap();
         // 超过首次重试窗口后仍没有连接，验证协议结果而非仅检查字段。
         thread::sleep(Duration::from_millis(3200));
@@ -1364,39 +1387,52 @@ mod playback_tests {
                 }
             }
         });
-        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, Vec::new()).unwrap();
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, Vec::new(), true).unwrap();
         receiver.connect(address, None).unwrap();
         wait_for(|| receiver.snapshot().state == "pending");
-        receiver.approve(true).unwrap();
+        receiver.approve().unwrap();
         server.join().unwrap();
         wait_for(|| receiver.snapshot().state == "waiting");
         assert_eq!(receiver.history().len(), 1);
-        assert!(!receiver.history()[0].auto_reconnect);
+        assert!(receiver.snapshot().auto_connect);
+        assert!(receiver.reconnect_suspended.load(Ordering::Acquire));
         assert_eq!(receiver.snapshot().received, 0);
         receiver.stop();
     }
 
     #[test]
-    fn background_buffer_restores_user_settings_and_keeps_its_floor_during_adaptation() {
+    fn independent_background_buffer_switches_profiles_and_preserves_preferences() {
         let dir = tempfile::tempdir().unwrap();
         let identity = Identity::load(&dir.path().join("phone")).unwrap();
-        let (mut receiver, _reader) = Receiver::start(identity, 0, 20, Vec::new()).unwrap();
-        receiver.set_background(true);
-        assert_eq!(receiver.snapshot().buffer_ms, 50);
-        assert_eq!(receiver.snapshot().buffer_floor_ms, 20);
-        receiver.set_buffer(10, false).unwrap();
-        assert_eq!(receiver.snapshot().buffer_ms, 50);
-        let now = Instant::now();
-        let mut adaptation = BufferAdaptation::new(50, now);
-        assert_eq!(adaptation.update(50, true, 1, 0, now), 55);
-        assert_eq!(
-            adaptation.update(55, true, 1, 0, now + Duration::from_secs(10)),
-            54
-        );
-        assert_eq!(adaptation.floor, 50);
-        receiver.set_background(false);
+        let (mut receiver, _reader) = Receiver::start(identity, 0, 10, 20, Vec::new(), true).unwrap();
         assert_eq!(receiver.snapshot().buffer_ms, 10);
+        receiver.set_background(true);
+        assert_eq!(receiver.snapshot().buffer_ms, 20);
+        assert_eq!(receiver.stats.target_frames.load(Ordering::Relaxed), 960);
         assert!(!receiver.snapshot().auto_buffer);
+        receiver.set_buffer(7, 30, false).unwrap();
+        assert_eq!(receiver.snapshot().buffer_ms, 30);
+        assert!(receiver.set_buffer(7, 101, false).is_err());
+        assert_eq!(receiver.snapshot().background_buffer_ms, 30);
+        receiver.set_buffer(8, 30, false).unwrap();
+        assert_eq!(receiver.snapshot().buffer_ms, 30);
+        receiver.set_background(false);
+        assert_eq!(receiver.snapshot().buffer_ms, 8);
+        receiver.set_buffer(8, 30, true).unwrap();
+        receiver.set_background(true);
+        assert_eq!(receiver.snapshot().buffer_floor_ms, 30);
+        assert!(receiver.snapshot().auto_buffer);
+        let now = Instant::now();
+        let mut adaptation = BufferAdaptation::new(30, now);
+        assert_eq!(adaptation.update(30, true, 1, 0, now), 35);
+        receiver.state.lock().unwrap().buffer_ms = 35;
+        receiver.set_background(true);
+        assert_eq!(receiver.snapshot().buffer_ms, 35);
+        receiver.set_buffer(9, 30, true).unwrap();
+        assert_eq!(receiver.snapshot().buffer_ms, 35);
+        receiver.set_background(false);
+        assert_eq!(receiver.snapshot().buffer_ms, 9);
+        assert!(receiver.snapshot().auto_buffer);
         receiver.stop();
     }
 
@@ -1454,19 +1490,163 @@ mod playback_tests {
                 }
             }
         });
-        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, Vec::new()).unwrap();
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, Vec::new(), true).unwrap();
         receiver.connect(address, None).unwrap();
         wait_for(|| receiver.snapshot().state == "pending");
-        receiver.approve(true).unwrap();
+        receiver.approve().unwrap();
         wait_for(|| !receiver.history().is_empty());
         receiver.disconnect();
         ready.send(()).unwrap();
         server.join().unwrap();
         wait_for(|| receiver.snapshot().state == "waiting");
         assert_eq!(receiver.history().len(), 1);
-        assert!(!receiver.history()[0].auto_reconnect);
+        assert!(receiver.snapshot().auto_connect);
+        assert!(receiver.reconnect_suspended.load(Ordering::Acquire));
         receiver.stop();
     }
+    #[test]
+    fn global_setting_controls_startup_and_manual_connect_restores_automatic_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = Identity::load(&dir.path().join("desktop")).unwrap();
+        let phone = Identity::load(&dir.path().join("phone")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let history = vec![ConnectionRecord {
+            fingerprint: desktop.fingerprint(),
+            name: "Desktop".into(),
+            address: address.to_string(),
+        }];
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, history, false).unwrap();
+        thread::sleep(Duration::from_millis(3200));
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        receiver.set_auto_connect(true);
+        let (ready, connected) = mpsc::channel();
+        let (step, steps) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for (index, expected) in [ConnectionIntent::Resume, ConnectionIntent::Manual, ConnectionIntent::Resume].into_iter().enumerate() {
+                let mut socket = None;
+                wait_for_timeout(Duration::from_secs(8), || {
+                    socket = listener.accept().ok().map(|(socket, _)| socket);
+                    socket.is_some()
+                });
+                let mut control = SecureControl::accept(socket.unwrap(), &desktop).unwrap();
+                control.send(&Message::Hello {
+                    name: "Desktop".into(), protocol: 2, control_port: Some(address.port()),
+                }).unwrap();
+                assert!(matches!(control.receive().unwrap(), Message::Request { intent } if intent == expected));
+                control.send(&Message::Ready).unwrap();
+                assert!(matches!(control.receive().unwrap(), Message::Pending { .. }));
+                assert!(matches!(control.receive().unwrap(), Message::Accept { .. }));
+                ready.send(index).unwrap();
+                if index == 0 {
+                    control.send(&Message::Stop {
+                        session_id: control.session_id().into(), reason: StopReason::UserDisconnect,
+                    }).unwrap();
+                    assert!(matches!(control.receive().unwrap(), Message::Stopped { .. }));
+                    steps.recv().unwrap();
+                } else if index == 1 {
+                    // 真实掉线后应恢复自动重连，而非仅检查暂停字段。
+                    steps.recv().unwrap();
+                } else {
+                    control.send(&Message::Stop {
+                        session_id: control.session_id().into(), reason: StopReason::UserDisconnect,
+                    }).unwrap();
+                    assert!(matches!(control.receive().unwrap(), Message::Stopped { .. }));
+                }
+            }
+        });
+        assert_eq!(connected.recv_timeout(Duration::from_secs(8)).unwrap(), 0);
+        wait_for(|| receiver.snapshot().state == "waiting");
+        assert!(receiver.snapshot().auto_connect);
+        assert!(receiver.reconnect_suspended.load(Ordering::Acquire));
+        thread::sleep(Duration::from_millis(3200));
+        receiver.connect(address, None).unwrap();
+        assert!(!receiver.reconnect_suspended.load(Ordering::Acquire));
+        step.send(()).unwrap();
+        assert_eq!(connected.recv_timeout(Duration::from_secs(8)).unwrap(), 1);
+        step.send(()).unwrap();
+        assert_eq!(connected.recv_timeout(Duration::from_secs(8)).unwrap(), 2);
+        server.join().unwrap();
+        receiver.stop();
+        assert!(receiver.snapshot().auto_connect);
+    }
+
+    #[test]
+    fn incoming_manual_connection_clears_pause_without_enabling_global_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = Identity::load(&dir.path().join("desktop")).unwrap();
+        let phone = Identity::load(&dir.path().join("phone")).unwrap();
+        let history = vec![ConnectionRecord {
+            fingerprint: desktop.fingerprint(),
+            name: "Desktop".into(),
+            address: String::new(),
+        }];
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, history, false).unwrap();
+        receiver.disconnect();
+        assert!(receiver.reconnect_suspended.load(Ordering::Acquire));
+        let address = SocketAddr::from(([127, 0, 0, 1], receiver.snapshot().port));
+        let (ready, connected) = mpsc::channel();
+        let (step, steps) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut control = SecureControl::connect(address, &desktop).unwrap();
+            control.send(&Message::Hello {
+                name: "Desktop".into(), protocol: 2, control_port: None,
+            }).unwrap();
+            assert!(matches!(control.receive().unwrap(), Message::Request { intent: ConnectionIntent::Manual }));
+            control.send(&Message::Ready).unwrap();
+            assert!(matches!(control.receive().unwrap(), Message::Pending { .. }));
+            assert!(matches!(control.receive().unwrap(), Message::Accept { .. }));
+            ready.send(()).unwrap();
+            steps.recv().unwrap();
+            control.send(&Message::Stop {
+                session_id: control.session_id().into(), reason: StopReason::ReceiverClosed,
+            }).unwrap();
+            assert!(matches!(control.receive().unwrap(), Message::Stopped { .. }));
+        });
+        connected.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(!receiver.reconnect_suspended.load(Ordering::Acquire));
+        assert!(!receiver.snapshot().auto_connect);
+        step.send(()).unwrap();
+        server.join().unwrap();
+        receiver.stop();
+    }
+
+    #[test]
+    fn disconnect_during_automatic_handshake_prevents_audio_acceptance() {
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = Identity::load(&dir.path().join("desktop")).unwrap();
+        let phone = Identity::load(&dir.path().join("phone")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let history = vec![ConnectionRecord {
+            fingerprint: desktop.fingerprint(), name: "Desktop".into(), address: address.to_string(),
+        }];
+        let (mut receiver, _reader) = Receiver::start(phone, 0, 20, 20, history, true).unwrap();
+        let (ready, connected) = mpsc::channel();
+        let (step, steps) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut control = SecureControl::accept(listener.accept().unwrap().0, &desktop).unwrap();
+            control.send(&Message::Hello {
+                name: "Desktop".into(), protocol: 2, control_port: Some(address.port()),
+            }).unwrap();
+            assert!(matches!(control.receive().unwrap(), Message::Request { intent: ConnectionIntent::Resume }));
+            ready.send(()).unwrap();
+            steps.recv().unwrap();
+            control.send(&Message::Ready).unwrap();
+            assert!(control.receive().is_err());
+        });
+        connected.recv_timeout(Duration::from_secs(3)).unwrap();
+        receiver.disconnect();
+        step.send(()).unwrap();
+        server.join().unwrap();
+        wait_for(|| receiver.snapshot().state == "waiting");
+        assert!(receiver.reconnect_suspended.load(Ordering::Acquire));
+        assert!(receiver.snapshot().auto_connect);
+        assert_eq!(receiver.snapshot().received, 0);
+        receiver.stop();
+    }
+
     fn wait_for(mut condition: impl FnMut() -> bool) {
         wait_for_timeout(Duration::from_secs(3), &mut condition);
     }
