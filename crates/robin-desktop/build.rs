@@ -3,7 +3,7 @@ fn main() {
     #[cfg(windows)]
     winresource::WindowsResource::new()
         .set_icon("assets/robin.ico")
-        .set("ProductName", "Robin · 知更鸟")
+        .set("ProductName", "知更鸟 Robin")
         .set("FileDescription", "Robin 桌面音频串流")
         .compile()
         .expect("could not embed Robin application icon");

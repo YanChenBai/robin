@@ -1,4 +1,4 @@
-# 知更鸟 · Robin
+# 知更鸟 Robin
 
 Windows 桌面向 Android 手机串流系统音频。桌面使用 GPUI Kit，手机使用 NativeScript Vue 3 + Vite，两端使用 Rust 与 rushaudio 协议收发音频。已实现首版采集、加密传输、手机确认、设备发现与原生播放；10–30 ms 端到端延迟仍待真机测量。
 

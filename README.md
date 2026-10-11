@@ -1,4 +1,4 @@
-# 知更鸟 · Robin
+# 知更鸟 Robin
 
 Windows 系统音频串流到 Android 手机。桌面使用 GPUI Kit，手机使用 NativeScript Vue 3 + Vite，Rust 负责加密传输与 Oboe 原生播放。仅提供深色主题。
 

@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <application android:name="com.tns.NativeScriptApplication" android:allowBackup="false" tools:replace="android:allowBackup" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="知更鸟 · Robin" android:theme="@style/AppTheme" android:usesCleartextTraffic="false">
+    <application android:name="com.tns.NativeScriptApplication" android:allowBackup="false" tools:replace="android:allowBackup" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="知更鸟 Robin" android:theme="@style/AppTheme" android:usesCleartextTraffic="false">
         <activity android:name="com.tns.NativeScriptActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|locale|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

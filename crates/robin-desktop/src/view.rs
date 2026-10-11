@@ -623,7 +623,7 @@ impl RobinView {
                 .child(div().text_sm().text_color(theme.muted_foreground).child("在手机选择要自动连接的电脑。地址变化后，手机会在同一网络重新寻找已信任的电脑。"))
                 .child(div().text_xs().text_color(theme.muted_foreground).child("首次配对需在手机确认；主动断开后不会自动连接。")))
             .child(div().flex().items_center().justify_between().pt_4().border_t_1().border_color(theme.border)
-                .child(div().text_sm().text_color(theme.muted_foreground).child("Robin · 知更鸟"))
+                .child(div().text_sm().text_color(theme.muted_foreground).child("知更鸟 Robin"))
                 .child(Button::new("quit").outline().icon(IconName::Power).label("退出 Robin").on_click(|_, _, cx| cx.quit())))
             .into_any_element()
     }

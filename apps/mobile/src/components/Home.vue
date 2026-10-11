@@ -304,7 +304,7 @@ onUnmounted(() => {
       <GridLayout rows="auto, *, auto">
         <GridLayout row="0" columns="*, auto" class="header">
           <StackLayout col="0">
-            <Label text="知更鸟 · Robin" class="eyebrow" />
+            <Label text="知更鸟 Robin" class="eyebrow" />
             <Label :text="pageTitle" class="brand" />
           </StackLayout>
           <Label col="1" :text="status" class="header-status" verticalAlignment="center" />

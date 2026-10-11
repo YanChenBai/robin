@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
                     window_min_size: Some(size(px(480.), px(640.))),
                     is_resizable: false,
                     titlebar: Some(TitlebarOptions {
-                        title: Some("知更鸟 · Robin".into()),
+                        title: Some("知更鸟 Robin".into()),
                         ..Default::default()
                     }),
                     ..Default::default()

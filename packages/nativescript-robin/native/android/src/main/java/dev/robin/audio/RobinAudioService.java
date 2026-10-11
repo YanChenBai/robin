@@ -203,7 +203,7 @@ public final class RobinAudioService extends Service {
                     media.setMetadata(new MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, title)
                         .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
                         .putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork)
-                        .putString(MediaMetadata.METADATA_KEY_ARTIST, "知更鸟 · Robin").build());
+                        .putString(MediaMetadata.METADATA_KEY_ARTIST, "知更鸟 Robin").build());
                     media.setPlaybackState(new PlaybackState.Builder()
                         .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_STOP)
                         .setState(playing ? PlaybackState.STATE_PLAYING : connected ? PlaybackState.STATE_PAUSED : PlaybackState.STATE_NONE,
@@ -222,7 +222,7 @@ public final class RobinAudioService extends Service {
     private Notification notification(String title, boolean playing) {
         Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
         PendingIntent content = PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this, "robin-audio").setContentTitle(title).setContentText("知更鸟 · Robin")
+        return new Notification.Builder(this, "robin-audio").setContentTitle(title).setContentText("知更鸟 Robin")
             .setSmallIcon(android.R.drawable.ic_media_play).setLargeIcon(artwork).setOngoing(true).setContentIntent(content)
             .setCategory(Notification.CATEGORY_TRANSPORT).setVisibility(Notification.VISIBILITY_PUBLIC)
             .addAction(new Notification.Action.Builder(playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
